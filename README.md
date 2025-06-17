@@ -1,6 +1,7 @@
 # Flight Search MCP Server
 
 A reliable Model Context Protocol (MCP) server for searching flights using the SerpAPI Google Flights engine. This server provides real-time flight search capabilities for both one-way and round-trip flights.
+Works well with claude ai desktop
 
 ## ✈️ Features
 
