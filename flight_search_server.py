@@ -1,30 +1,36 @@
 #!/usr/bin/env python3
 """
 Simple Flight Search MCP Server
-By Random Robbie
+By Random Robbie, updated for travel_class, search other_flights, layover, 20 results
 """
 
 import json
 import sys
 import asyncio
 import requests
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 import argparse
-from datetime import datetime
 import logging
+import os
 
 # Set up logging to stderr so it doesn't interfere with JSON-RPC
 logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
-
 class FlightSearchServer:
     def __init__(self, serp_api_key: str):
         self.serp_api_key = serp_api_key
-        
-    def search_flights(self, origin: str, destination: str, outbound_date: str, return_date: str = None) -> Dict[str, Any]:
+
+    def search_flights(
+        self,
+        origin: str,
+        destination: str,
+        outbound_date: str,
+        return_date: str = None,
+        travel_class: str = None
+    ) -> Dict[str, Any]:
         """Search for flights using SerpAPI Google Flights"""
-        
+
         params = {
             "engine": "google_flights",
             "departure_id": origin,
@@ -33,41 +39,61 @@ class FlightSearchServer:
             "currency": "USD",
             "api_key": self.serp_api_key
         }
-        
-        # Fix: Handle one-way vs round trip properly
+
+        # Handle one-way vs round trip
         if return_date:
             params["return_date"] = return_date
             params["type"] = "1"  # Round trip
         else:
             params["type"] = "2"  # One way
-            
+
+        # Add travel_class if provided
+        if travel_class:
+            params["travel_class"] = travel_class
+
         try:
             response = requests.get("https://serpapi.com/search", params=params)
             response.raise_for_status()
             data = response.json()
-            
+
             # Check for API errors
             if "error" in data:
                 return {
                     "status": "error",
                     "message": f"SerpAPI error: {data['error']}"
                 }
-            
+
             # Extract flight information
             flights = []
-            best_flights = data.get("best_flights", [])
-            
-            for flight in best_flights[:5]:  # Top 5 flights
+            best_flights = data.get("best_flights", []) + data.get("other_flights", [])
+
+            for flight in best_flights[:20]:  # Top 20 flights
+                layover_info = []
+                for layover in flight.get("layovers", []):
+                    minutes = layover.get("duration")
+                    airport = layover.get("name", layover.get("id", ""))
+                    overnight = layover.get("overnight", False)
+                    h, m = divmod(minutes or 0, 60)
+                    label = f"{h}h {m}m at {airport}"
+                    if overnight:
+                        label += " (overnight)"
+                    layover_info.append(label)
+
+                # Defensive: get the first segment for times/airline
+                segments = flight.get("flights", [{}])
+                first_seg = segments[0] if segments else {}
+
                 flight_info = {
                     "price": flight.get("price", "N/A"),
-                    "departure_time": flight.get("flights", [{}])[0].get("departure_airport", {}).get("time"),
-                    "arrival_time": flight.get("flights", [{}])[0].get("arrival_airport", {}).get("time"),
-                    "airline": flight.get("flights", [{}])[0].get("airline"),
+                    "departure_time": first_seg.get("departure_airport", {}).get("time"),
+                    "arrival_time": first_seg.get("arrival_airport", {}).get("time"),
+                    "airline": first_seg.get("airline"),
                     "duration": flight.get("total_duration"),
-                    "stops": len(flight.get("flights", [])) - 1
+                    "stops": len(segments) - 1,
+                    "layovers": layover_info if layover_info else ["None"]
                 }
                 flights.append(flight_info)
-                
+
             return {
                 "status": "success",
                 "origin": origin,
@@ -75,9 +101,10 @@ class FlightSearchServer:
                 "outbound_date": outbound_date,
                 "return_date": return_date,
                 "trip_type": "round_trip" if return_date else "one_way",
+                "travel_class": travel_class if travel_class else "1 (Economy, default)",
                 "flights": flights
             }
-            
+
         except requests.RequestException as e:
             return {
                 "status": "error",
@@ -85,7 +112,7 @@ class FlightSearchServer:
             }
         except Exception as e:
             return {
-                "status": "error", 
+                "status": "error",
                 "message": f"Error processing flight data: {str(e)}"
             }
 
@@ -94,19 +121,20 @@ class FlightSearchServer:
         request_id = request.get("id")
         if request_id is None:
             request_id = "unknown"
-            
+
         try:
             tool_name = request["params"]["name"]
             arguments = request["params"].get("arguments", {})
-            
+
             if tool_name == "search_flights":
                 result = self.search_flights(
                     origin=arguments.get("origin", ""),
                     destination=arguments.get("destination", ""),
                     outbound_date=arguments.get("outbound_date", ""),
-                    return_date=arguments.get("return_date")
+                    return_date=arguments.get("return_date"),
+                    travel_class=arguments.get("travel_class")
                 )
-                
+
                 return {
                     "jsonrpc": "2.0",
                     "id": request_id,
@@ -119,10 +147,10 @@ class FlightSearchServer:
                         ]
                     }
                 }
-            
+
             elif tool_name == "server_status":
                 return {
-                    "jsonrpc": "2.0", 
+                    "jsonrpc": "2.0",
                     "id": request_id,
                     "result": {
                         "content": [
@@ -133,17 +161,17 @@ class FlightSearchServer:
                         ]
                     }
                 }
-            
+
             else:
                 return {
                     "jsonrpc": "2.0",
-                    "id": request_id, 
+                    "id": request_id,
                     "error": {
                         "code": -32601,
                         "message": f"Unknown tool: {tool_name}"
                     }
                 }
-                
+
         except Exception as e:
             logger.error(f"Error in handle_call_tool: {e}")
             return {
@@ -160,7 +188,7 @@ class FlightSearchServer:
         request_id = request.get("id")
         if request_id is None:
             request_id = "unknown"
-            
+
         tools = [
             {
                 "name": "search_flights",
@@ -173,7 +201,7 @@ class FlightSearchServer:
                             "description": "Origin airport code (e.g., JFK, LAX)"
                         },
                         "destination": {
-                            "type": "string", 
+                            "type": "string",
                             "description": "Destination airport code (e.g., JFK, LAX)"
                         },
                         "outbound_date": {
@@ -183,6 +211,10 @@ class FlightSearchServer:
                         "return_date": {
                             "type": "string",
                             "description": "Return date for round trip (YYYY-MM-DD)"
+                        },
+                        "travel_class": {
+                            "type": "string",
+                            "description": "1=Economy, 2=Premium Economy, 3=Business, 4=First (optional)"
                         }
                     },
                     "required": ["origin", "destination", "outbound_date"]
@@ -197,7 +229,7 @@ class FlightSearchServer:
                 }
             }
         ]
-        
+
         return {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -211,7 +243,7 @@ class FlightSearchServer:
         request_id = request.get("id")
         if request_id is None:
             request_id = "unknown"
-            
+
         return {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -222,7 +254,7 @@ class FlightSearchServer:
                 },
                 "serverInfo": {
                     "name": "flight-search-server",
-                    "version": "1.0.2"
+                    "version": "1.0.9"
                 }
             }
         }
@@ -232,7 +264,7 @@ class FlightSearchServer:
         request_id = request.get("id")
         if request_id is None:
             request_id = "unknown"
-            
+
         return {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -251,27 +283,27 @@ class FlightSearchServer:
     async def run_stdio(self):
         """Run server using stdio transport"""
         logger.info("Starting flight search MCP server...")
-        
+
         while True:
             try:
                 line = sys.stdin.readline()
                 if not line:
                     logger.info("EOF received, shutting down")
                     break
-                    
+
                 line = line.strip()
                 if not line:
                     continue
-                
+
                 logger.debug(f"Received: {line}")
                 request = json.loads(line)
-                
+
                 # Handle different request types
                 method = request.get("method")
                 request_id = request.get("id", "unknown")
-                
+
                 logger.debug(f"Processing method: {method}, id: {request_id}")
-                
+
                 if method == "initialize":
                     response = await self.handle_initialize(request)
                 elif method == "tools/list":
@@ -293,9 +325,9 @@ class FlightSearchServer:
                             "message": f"Method not found: {method}"
                         }
                     }
-                
+
                 self.send_response(response)
-                
+
             except EOFError:
                 logger.info("EOF received, shutting down")
                 break
@@ -322,22 +354,20 @@ class FlightSearchServer:
                 }
                 self.send_response(error_response)
 
-
 def main():
     parser = argparse.ArgumentParser(description="Flight Search MCP Server")
     parser.add_argument("--connection_type", choices=["stdio", "http"], default="stdio")
     parser.add_argument("--port", type=int, default=3001)
     args = parser.parse_args()
-    
+
     # Get API key from environment
-    import os
     serp_api_key = os.getenv("SERP_API_KEY")
     if not serp_api_key:
         logger.error("SERP_API_KEY environment variable not set")
         sys.exit(1)
-    
+
     server = FlightSearchServer(serp_api_key)
-    
+
     if args.connection_type == "stdio":
         try:
             asyncio.run(server.run_stdio())
@@ -349,7 +379,6 @@ def main():
     else:
         logger.error("HTTP server not implemented yet. Use stdio mode.")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
